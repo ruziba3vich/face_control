@@ -1,0 +1,128 @@
+FaceGate camera smoke test — what to run, in order.
+Copy each block into your terminal. Paste the output back to Claude.
+
+================================================================================
+0) Confirm the device is alive (cheap, no body)
+================================================================================
+
+curl -sS --max-time 5 -X POST http://192.0.0.22:8000/ \
+  -u admin:admin \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -d '{"version":"0.2","cmd":"get params"}' \
+  | head -c 200; echo
+
+
+Expected: a JSON blob starting with {"cmd":"get params","code":0,...
+If it hangs or errors here, stop — the device is wedged or unreachable.
+
+
+================================================================================
+1) Convert the photo PNG → JPEG (already done; this is just a re-run guard)
+================================================================================
+
+PHOTO="/home/prodonik/Downloads/Telegram Desktop/IMG_1199.PNG"
+JPG=/tmp/face_register.jpg
+magick "$PHOTO" -strip -quality 85 -resize '1024x1024>' "$JPG"
+ls -lh "$JPG"
+
+
+Expected: ~24K JPEG. (Use `convert` if you don't have `magick`.)
+
+
+================================================================================
+2) Build the request body with jq (clean escaping)
+================================================================================
+
+B64=$(base64 -w0 "$JPG")
+jq -n --arg b64 "$B64" '{
+  version: "0.2",
+  cmd: "add person jpg",
+  id: "u_test_001",
+  name: "Test User",
+  role: 1,
+  kind: 0,
+  cover: true,
+  image_num: 1,
+  reg_images: [ { format: "jpg", image_data: $b64 } ],
+  customer_text: "smoke-test"
+}' > /tmp/register.json
+ls -lh /tmp/register.json
+
+
+Expected: file ~33K.
+
+
+================================================================================
+3) Send it — verbose, with the two flags that matter for embedded servers
+================================================================================
+
+curl -v --max-time 30 -X POST http://192.0.0.22:8000/ \
+  -u admin:admin \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -H 'Expect:' \
+  --data-binary @/tmp/register.json
+echo
+
+
+Why these flags:
+  --data-binary @file : curl reads from disk, sets a real Content-Length,
+                        does NOT use chunked transfer-encoding (which the
+                        device explicitly forbids).
+  -H 'Expect:'        : suppresses the 100-continue handshake that some
+                        embedded servers stall on.
+
+Expected on success:
+  < HTTP/1.1 200 OK
+  ...
+  {"reply":"ACK","cmd":"add person jpg","code":0,"id":"u_test_001"}
+
+If code != 0, the meaning of the code:
+  21  record already exists (cover:true should prevent — try cmd "update person jpg")
+  25  failed to extract face (no face detected in the image)
+  35  image decoding failed (sent wrong format)
+  36  image too large (>10 MB)
+  38  face too small in the frame
+  39  portrait quality too poor
+  40  more than one face in the image
+  41  face is incomplete
+
+
+================================================================================
+4) Verify the person actually landed in the device's database
+================================================================================
+
+curl -sS --max-time 10 -X POST http://192.0.0.22:8000/ \
+  -u admin:admin \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -H 'Expect:' \
+  -d '{"version":"0.2","cmd":"request persons","role":-1,"page_no":1,"page_size":10,"feature_flag":0,"image_flag":0}' \
+  | jq '{total, count, persons: [.persons[] | {id, name, role}]}'
+
+
+Expected: u_test_001 / Test User / 1 in the persons array.
+
+
+================================================================================
+5) (Optional) Clean up the test entry
+================================================================================
+
+curl -sS --max-time 10 -X POST http://192.0.0.22:8000/ \
+  -u admin:admin \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -H 'Expect:' \
+  -d '{"version":"0.2","cmd":"delete person(s)","flag":-1,"id":"u_test_001"}' \
+  | jq .
+
+
+Expected: {"reply":"ACK","cmd":"delete person(s)","code":0,"id":"u_test_001"}
+
+
+================================================================================
+What to paste back to Claude
+================================================================================
+
+- Output of step 0 (just confirms the device is alive).
+- Full -v output of step 3 (the register call). Especially the request headers
+  curl sends ('> Content-Length: ...' or '> Transfer-Encoding: chunked') and
+  the response status line ('< HTTP/1.1 ...') and body.
+- Output of step 4 (verifies the registration took).

@@ -71,6 +71,24 @@ func (r *Repo) Get(ctx context.Context, deviceID, userID uuid.UUID) (*Registrati
 	return &reg, nil
 }
 
+func (r *Repo) ListByDevice(ctx context.Context, deviceID uuid.UUID) ([]Registration, error) {
+	var out []Registration
+	const q = `SELECT * FROM device_registrations WHERE device_id = $1 ORDER BY created_at DESC`
+	if err := r.db.SelectContext(ctx, &out, q, deviceID); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (r *Repo) ListByUser(ctx context.Context, userID uuid.UUID) ([]Registration, error) {
+	var out []Registration
+	const q = `SELECT * FROM device_registrations WHERE user_id = $1 ORDER BY created_at DESC`
+	if err := r.db.SelectContext(ctx, &out, q, userID); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // Service ties the HASdk client, the three repos, and the user's photo file
 // together. RegisterUser is the main flow: load device + user, derive faceID,
 // read photo bytes, push to device, persist outcome.
@@ -122,8 +140,8 @@ func (s *Service) RegisterUser(ctx context.Context, deviceID, userID uuid.UUID) 
 	sdkErr := s.HASdk.Register(ctx, hasdk.RegisterRequest{
 		Device:   toSdkDevice(d),
 		FaceID:   faceID,
-		FaceName: truncate(u.FullName, 16),
-		Role:     hasdk.RoleNormal,
+		FaceName: truncate(u.FullName, 15), // device caps name at 15 bytes (HTTP_En.pdf §2.1.3)
+		Role:     hasdk.RoleWhitelisted,    // device rejects role=0 at registration; default whitelist
 		JPEG:     jpeg,
 	})
 	if sdkErr != nil {

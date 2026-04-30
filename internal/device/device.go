@@ -28,7 +28,7 @@ func (r *Repo) Create(ctx context.Context, d *Device) error {
 		d.ID = uuid.New()
 	}
 	if d.Port == 0 {
-		d.Port = 9527
+		d.Port = 8000 // FaceGate HTTP JSON API; vendor doc HTTP_En.pdf §1.1.1
 	}
 	if d.Username == "" {
 		d.Username = "admin"

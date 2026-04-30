@@ -41,4 +41,9 @@ func (c *NoopClient) Delete(_ context.Context, dev Device, faceID string) error 
 	return nil
 }
 
+func (c *NoopClient) Ping(_ context.Context, dev Device) (string, error) {
+	c.Log.Info("hasdk.noop ping", "device_id", dev.ID, "host", dev.Host)
+	return "noop-device", nil
+}
+
 func (c *NoopClient) Close() error { return nil }

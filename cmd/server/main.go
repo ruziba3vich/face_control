@@ -59,9 +59,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Default to NoopClient. To use the real SDK, build with `-tags hasdk` and
-	// swap this for `hasdk.NewCgoClient(cfg.HASdkModelDir)`.
-	var sdkClient hasdk.Client = hasdk.NewNoopClient(log)
+	// Default to the device's HTTP API on :8000 (vendor-documented JSON
+	// command interface). Set HASDK_NOOP=1 to fall back to the no-op logger.
+	var sdkClient hasdk.Client = hasdk.NewHTTPClient(log)
+	if os.Getenv("HASDK_NOOP") == "1" {
+		sdkClient = hasdk.NewNoopClient(log)
+	}
 	defer sdkClient.Close()
 
 	devRepo := device.NewRepo(db)
@@ -76,11 +79,13 @@ func main() {
 	}
 
 	h := &api.Handler{
-		Devices:       devRepo,
-		Users:         userRepo,
-		Registrations: regSvc,
-		Photos:        photos,
-		Log:           log,
+		Devices:          devRepo,
+		Users:            userRepo,
+		Registrations:    regSvc,
+		RegistrationRepo: regRepo,
+		Photos:           photos,
+		HASdk:            sdkClient,
+		Log:              log,
 	}
 
 	root := chi.NewRouter()

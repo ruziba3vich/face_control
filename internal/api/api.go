@@ -10,17 +10,20 @@ import (
 	"github.com/google/uuid"
 
 	"udevs/face_control/internal/device"
+	"udevs/face_control/internal/hasdk"
 	"udevs/face_control/internal/registration"
 	"udevs/face_control/internal/storage"
 	"udevs/face_control/internal/user"
 )
 
 type Handler struct {
-	Devices       *device.Repo
-	Users         *user.Repo
-	Registrations *registration.Service
-	Photos        storage.PhotoStore
-	Log           *slog.Logger
+	Devices         *device.Repo
+	Users           *user.Repo
+	Registrations   *registration.Service
+	RegistrationRepo *registration.Repo
+	Photos          storage.PhotoStore
+	HASdk           hasdk.Client
+	Log             *slog.Logger
 }
 
 func (h *Handler) Routes() http.Handler {
@@ -33,11 +36,16 @@ func (h *Handler) Routes() http.Handler {
 		r.Post("/", h.createDevice)
 		r.Get("/", h.listDevices)
 		r.Get("/{id}", h.getDevice)
+		r.Post("/{id}/ping", h.pingDevice)
+		r.Get("/{device_id}/registrations", h.listDeviceRegistrations)
 		r.Post("/{device_id}/registrations", h.registerUserOnDevice)
 		r.Delete("/{device_id}/registrations/{user_id}", h.deleteRegistration)
 	})
 
-	r.Post("/users", h.createUser)
+	r.Route("/users", func(r chi.Router) {
+		r.Post("/", h.createUser)
+		r.Get("/{id}/registrations", h.listUserRegistrations)
+	})
 	return r
 }
 
@@ -101,6 +109,66 @@ func (h *Handler) getDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, d)
+}
+
+// pingDevice does a live reachability check against the camera and returns
+// the device's serial number on success.
+func (h *Handler) pingDevice(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	d, err := h.Devices.Get(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "device not found")
+		return
+	}
+	sn, err := h.HASdk.Ping(r.Context(), hasdk.Device{
+		ID: d.ID.String(), Host: d.IP, Port: uint16(d.Port),
+		Username: d.Username, Password: d.Password,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"reachable": "false",
+			"error":     err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"reachable": true,
+		"device_sn": sn,
+	})
+}
+
+func (h *Handler) listDeviceRegistrations(w http.ResponseWriter, r *http.Request) {
+	deviceID, err := uuid.Parse(chi.URLParam(r, "device_id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid device_id")
+		return
+	}
+	regs, err := h.RegistrationRepo.ListByDevice(r.Context(), deviceID)
+	if err != nil {
+		h.Log.Error("list device registrations", "err", err)
+		writeError(w, http.StatusInternalServerError, "list failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, regs)
+}
+
+func (h *Handler) listUserRegistrations(w http.ResponseWriter, r *http.Request) {
+	userID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+	regs, err := h.RegistrationRepo.ListByUser(r.Context(), userID)
+	if err != nil {
+		h.Log.Error("list user registrations", "err", err)
+		writeError(w, http.StatusInternalServerError, "list failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, regs)
 }
 
 // ---------- users ----------
@@ -167,8 +235,20 @@ func (h *Handler) registerUserOnDevice(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, registration.ErrUserNotFound):
 			writeError(w, http.StatusNotFound, "user not found")
 		default:
+			// Distinguish a device-side rejection (bad photo, face quality, etc.)
+			// from infrastructure failure: 422 vs 502.
+			var apiErr *hasdk.APIError
+			if errors.As(err, &apiErr) {
+				h.Log.Warn("device rejected registration", "code", apiErr.Code, "desc", apiErr.Desc)
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+					"error":          err.Error(),
+					"device_code":    apiErr.Code,
+					"device_message": apiErr.Error(),
+					"registration":   reg,
+				})
+				return
+			}
 			h.Log.Error("register", "err", err)
-			// reg may carry the failed row; still return it so the caller sees status=failed
 			if reg != nil {
 				writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error(), "registration": reg})
 				return

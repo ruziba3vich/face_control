@@ -2,3 +2,6 @@
 data/
 third_party/
 *.test
+
+# Build output from local helpers (e.g. cmd/wssniff)
+/wssniff
